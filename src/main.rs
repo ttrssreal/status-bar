@@ -47,10 +47,17 @@ pub fn get_vol_component() -> anyhow::Result<String> {
 	return Ok(std::str::from_utf8(&result.stdout[..])?.to_string());
 }
 
+pub fn get_battery_component() -> anyhow::Result<String> {
+	let percentage = std::fs::read_to_string("/sys/class/power_supply/BAT0/capacity")?.trim().to_string();
+	return Ok(percentage);
+}
+
 pub fn get_status_bar() -> anyhow::Result<String> {
 	let time = get_time_component();
 	let vol = get_vol_component()?;
-	return Ok(format!(" {} | {} ", vol, time));
+	let batt = get_battery_component()?;
+	// battery and sound icons from font-awesome
+	return Ok(format!("  {}% |  {} | {} ", batt, vol, time));
 }
 
 pub async fn handle_dbus_calls(conn: &RustConnection, root: Window, dbus_stream: &mut MessageStream) -> anyhow::Result<()> {
