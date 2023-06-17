@@ -1,4 +1,3 @@
-use std::fmt::format;
 use std::sync::Arc;
 use std::time::Duration;
 use x11rb;
@@ -61,8 +60,20 @@ pub fn get_vol_component() -> anyhow::Result<String> {
 }
 
 pub fn get_battery_component() -> anyhow::Result<String> {
-	let percentage = std::fs::read_to_string("/sys/class/power_supply/BAT0/capacity")?.trim().to_string();
-	return Ok(percentage);
+	let percentage = std::fs::read_to_string("/sys/class/power_supply/BAT0/capacity")?
+		.trim()
+		.parse::<i32>()?;
+	let icon = match percentage {
+		0..=10 => "\u{f06d}",
+		11..=15 => "\u{f244}",
+		16..=50 => "\u{f243}",
+		51..=75 => "\u{f242}",
+		76..=99 => "\u{f241}",
+		100 => "\u{f240}",
+		_ => "\u{f06d}",
+	};
+	
+	return Ok(format!("{icon} {percentage}%"));
 }
 
 pub fn get_status_bar() -> anyhow::Result<String> {
@@ -70,7 +81,7 @@ pub fn get_status_bar() -> anyhow::Result<String> {
 	let vol = get_vol_component()?;
 	let batt = get_battery_component()?;
 	// battery and sound icons from font-awesome
-	return Ok(format!(" {}% | {} | {} ", batt, vol, time));
+	return Ok(format!(" {} | {} | {} ", batt, vol, time));
 }
 
 pub async fn handle_dbus_calls(conn: &RustConnection, root: Window, dbus_stream: &mut MessageStream) -> anyhow::Result<()> {
