@@ -1,3 +1,4 @@
+use std::fmt::format;
 use std::sync::Arc;
 use std::time::Duration;
 use x11rb;
@@ -34,17 +35,29 @@ pub fn get_time_component() -> String {
 }
 
 pub fn get_vol_component() -> anyhow::Result<String> {
-	let result = std::process::Command::new("bash")
+	let proc = std::process::Command::new("bash")
 		.arg("-c")
-		.arg("amixer -D pipewire sget Master 			\
-				| tail -n 1								\
-				| grep --colour=never -o '[0-9]\\+%'	\
+		.arg("amixer -D pipewire sget Master 						\
+				| tail -n 1											\
+				| grep --colour=never -o '[0-9]\\+%\\|\\[off\\]'	\
 				| tr -d '\\n'")
 		.output()?;
-	if !result.status.success() {
+	if !proc.status.success() {
 		bail!("Couldn't fetch audio level with 'amixer' (tail and grep).");
 	}
-	return Ok(std::str::from_utf8(&result.stdout[..])?.to_string());
+	let output = std::str::from_utf8(&proc.stdout[..])?.to_string();
+	if output.contains("off") {
+		let vol = &output[0..output.len() - 5]; // trim '[off]' from "X%[off]"
+		return Ok(format!("\u{f6a9} {vol}"));
+	}
+	let value = output[0..output.len() - 1].parse::<i32>()?;
+	let icon = match value {
+		0 => "\u{f026}",
+		1..=75 => "\u{f027}",
+		76..=100 => "\u{f028}",
+		_ => "\u{f06d}",
+	};
+	return Ok(format!("{icon} {value}%"));
 }
 
 pub fn get_battery_component() -> anyhow::Result<String> {
@@ -57,7 +70,7 @@ pub fn get_status_bar() -> anyhow::Result<String> {
 	let vol = get_vol_component()?;
 	let batt = get_battery_component()?;
 	// battery and sound icons from font-awesome
-	return Ok(format!("  {}% |  {} | {} ", batt, vol, time));
+	return Ok(format!(" {}% | {} | {} ", batt, vol, time));
 }
 
 pub async fn handle_dbus_calls(conn: &RustConnection, root: Window, dbus_stream: &mut MessageStream) -> anyhow::Result<()> {
