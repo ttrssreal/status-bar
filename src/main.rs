@@ -63,7 +63,7 @@ pub fn get_battery_component() -> anyhow::Result<String> {
 	let percentage = std::fs::read_to_string("/sys/class/power_supply/BAT0/capacity")?
 		.trim()
 		.parse::<i32>()?;
-	let icon = match percentage {
+	let battery_icon = match percentage {
 		0..=10 => "\u{f06d}",
 		11..=15 => "\u{f244}",
 		16..=50 => "\u{f243}",
@@ -72,16 +72,37 @@ pub fn get_battery_component() -> anyhow::Result<String> {
 		100 => "\u{f240}",
 		_ => "\u{f06d}",
 	};
+
+	let charging_status = std::fs::read_to_string("/sys/class/power_supply/BAT0/status")?;
+	let charging_icon = if charging_status.trim() == "Charging" { "\u{f0e7} " } else { "" };
 	
-	return Ok(format!("{icon} {percentage}%"));
+	return Ok(format!("{charging_icon}{battery_icon} {percentage}%"));
+}
+
+pub fn get_wifi_component() -> anyhow::Result<String> {
+	// nmcli -t -f active,ssid dev wifi | egrep '^yes' | cut -d':' -f2
+	let proc = std::process::Command::new("bash")
+		.arg("-c")
+		.arg("nmcli -t -f active,ssid dev wifi 						\
+				| egrep '^yes'										\
+				| cut -d':' -f2")
+		.output()?;
+	if !proc.status.success() {
+		bail!("Couldn't fetch ssid level with 'nmcli' (egrep and cut).");
+	}
+	let ssid = std::str::from_utf8(&proc.stdout[..])?.trim();
+	let connected = !ssid.is_empty();
+	let icon = if connected { "\u{f1eb} " } else { "\u{f05e}" };
+	return Ok(format!("{icon}{ssid}"));
 }
 
 pub fn get_status_bar() -> anyhow::Result<String> {
 	let time = get_time_component();
 	let vol = get_vol_component()?;
 	let batt = get_battery_component()?;
+	let wifi = get_wifi_component()?;
 	// battery and sound icons from font-awesome
-	return Ok(format!(" {} | {} | {} ", batt, vol, time));
+	return Ok(format!(" {wifi} | {batt} | {vol} | {time} "));
 }
 
 pub async fn handle_dbus_calls(conn: &RustConnection, root: Window, dbus_stream: &mut MessageStream) -> anyhow::Result<()> {
