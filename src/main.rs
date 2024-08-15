@@ -1,14 +1,23 @@
+mod status_bar;
+
+use status_bar::StatusBar;
+use tokio::task::JoinSet;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::process;
+use std::sync::mpsc::channel;
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::Sender;
+use std::process::Output;
+use regex::Regex;
 use x11rb;
 use x11rb::rust_connection::{RustConnection, ConnectionError};
 use x11rb::wrapper::ConnectionExt;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{PropMode, AtomEnum, Window};
-use anyhow::{bail, Context, Ok};
+use anyhow::{bail, Ok};
+use std::env;
 use chrono::Local;
-use zbus::{self, MessageType, MessageStream};
-use zbus::export::futures_util::TryStreamExt;
 
 fn set_status_bar(
 		conn: &RustConnection,
@@ -26,126 +35,192 @@ fn set_status_bar(
 	Result::<(), ConnectionError>::Ok(())
 }
 
-pub fn get_time_component() -> String {
-	return Local::now()
-		.format("%a %d %b %H:%M:%S")
-		.to_string()
-		.clone();
+pub fn start_time_component(
+        status_bar: Arc<StatusBar>,
+        joinset: &mut JoinSet<()>,
+        update_handle: Sender<()>)
+{
+	joinset.spawn(async move {
+        loop {
+            {
+                let mut time = status_bar.time.lock().unwrap();
+                time.clear();
+                time.push_str(&Local::now().format("%a %d %b %H:%M:%S").to_string());
+                update_handle.send(()).expect("Can't trigger update!");
+            }
+            tokio::time::sleep(Duration::from_millis(status_bar.time_update_period)).await;
+        }
+    });
 }
 
-pub fn get_vol_component() -> anyhow::Result<String> {
-	let proc = std::process::Command::new("bash")
-		.arg("-c")
-		.arg("amixer -D pipewire sget Master 						\
-				| tail -n 1											\
-				| grep --colour=never -o '[0-9]\\+%\\|\\[off\\]'	\
-				| tr -d '\\n'")
-		.output()?;
-	if !proc.status.success() {
-		bail!("Couldn't fetch audio level with 'amixer' (tail and grep).");
+pub fn start_volume_component(
+    status_bar: Arc<StatusBar>,
+    joinset: &mut JoinSet<()>,
+    update_handle: Sender<()>)
+{
+	joinset.spawn(async move {
+        let audio_level_re = Regex::new(r"\[(\d+%)\]").unwrap();
+        let err_msg = "failed to run 'amixer', is it installed?";
+        loop {
+            let amixer_out = process::Command::new("amixer")
+                .arg("get")
+                .arg("Master")
+                .output()
+                .await;
+            let res = match amixer_out {
+                Result::Ok(Output { status, stdout, stderr }) => {
+                    if status.success() {
+                        stdout
+                    } else {
+                        panic!("{err_msg}: {stderr:?}")
+                    }
+                },
+                Err(_) => panic!("{}", err_msg)
+            };
+            let audio_info = String::from_utf8_lossy(res.as_slice());
+            let audio_level_line = audio_info
+                .lines()
+                .find(|line| { line.contains("Front Left:") })
+                .expect("Bad 'amixer' output");
+            let audio_level = &audio_level_re
+                .captures(audio_level_line)
+                .expect("Bad 'amixer' output")[1];
+            let value = audio_level[0..audio_level.len() - 1].parse::<u32>()
+                .unwrap();
+            let icon = match value {
+                0 => "\u{f026}",
+                1..=75 => "\u{f027}",
+                76..=100 => "\u{f028}",
+                _ => "\u{f06d}",
+            };
+            {
+                let mut volume = status_bar.volume.lock().unwrap();
+                volume.clear();
+                volume.push_str(&format!("{icon} {audio_level}"));
+                update_handle.send(()).expect("Can't trigger update!");
+            }
+            tokio::time::sleep(Duration::from_millis(status_bar.volume_update_period)).await;
+        }
+    });
+}
+
+pub fn start_battery_component(
+    status_bar: Arc<StatusBar>,
+    joinset: &mut JoinSet<()>,
+    update_handle: Sender<()>)
+{
+	joinset.spawn(async move {
+        loop {
+            let percentage = std::fs::read_to_string(env::var("BATTERY_CAPACITY_DEVICE")
+                                                     .expect("BATTERY_CAPACITY_DEVICE"))
+                .expect("Can't read battery level")
+	        	.trim()
+	        	.parse::<i32>()
+                .unwrap();
+	        let battery_icon = match percentage {
+	        	0..=10 => "\u{f06d}",
+	        	11..=15 => "\u{f244}",
+	        	16..=50 => "\u{f243}",
+	        	51..=75 => "\u{f242}",
+	        	76..=99 => "\u{f241}",
+	        	100 => "\u{f240}",
+	        	_ => "\u{f06d}",
+	        };
+            let charging_status = std::fs::read_to_string(env::var("BATTERY_STATUS_DEVICE")
+                                                          .expect("BATTERY_STATUS_DEVICE"))
+                .expect("Can't read battery status");
+            let charging_icon = match charging_status.trim() {
+                "Charging" => "\u{f0e7} ",
+                _ => ""
+            };
+            {
+                let mut battery = status_bar.battery.lock().unwrap();
+                battery.clear();
+                battery.push_str(&format!("{charging_icon}{battery_icon} {percentage}%"));
+                update_handle.send(()).expect("Can't trigger update!");
+            }
+            tokio::time::sleep(Duration::from_millis(status_bar.battery_update_period)).await;
+        }
+    });
+}
+
+pub fn start_wifi_component(
+    status_bar: Arc<StatusBar>,
+    joinset: &mut JoinSet<()>,
+    update_handle: Sender<()>)
+{
+	joinset.spawn(async move {
+        let err_msg = "failed to run 'nmcli', is it installed?";
+        loop {
+            let nmcli_out = process::Command::new("nmcli")
+                .arg("-g").arg("general.connection")
+                .arg("device")
+                .arg("show")
+                .arg(env::var("WIFI_DEVICE_NAME").expect("WIFI_DEVICE_NAME"))
+                .output()
+                .await;
+            let res = match nmcli_out {
+                Result::Ok(Output { status, stdout, stderr }) => {
+                    if status.success() {
+                        stdout
+                    } else {
+                        panic!("{err_msg}: {stderr:?}")
+                    }
+                },
+                Err(_) => panic!("{}", err_msg)
+            };
+            let ssid = String::from_utf8_lossy(res.as_slice());
+            let ssid = ssid.trim();
+            let connected = ssid.len() != 0;
+	        let icon = if connected { "\u{f1eb} " } else { "\u{f05e}" };
+            {
+                let mut wifi = status_bar.wifi.lock().unwrap();
+                wifi.clear();
+                wifi.push_str(&format!("{icon}{ssid}"));
+                update_handle.send(()).expect("Can't trigger update!");
+            }
+            tokio::time::sleep(Duration::from_millis(status_bar.wifi_update_period)).await;
+        }
+    });
+}
+
+pub fn start_update_status_bar(
+    status_bar: Arc<StatusBar>,
+    joinset: &mut JoinSet<()>,
+    update_requests: Receiver<()>
+) -> anyhow::Result<()> {
+    // Connect to X11 server
+	let (x11_conn, _) = x11rb::connect(None)?;
+	let screens = &x11_conn.setup().roots;
+	if screens.len() < 1 {
+		bail!("No root window");
 	}
-	let output = std::str::from_utf8(&proc.stdout[..])?.to_string();
-	if output.contains("off") {
-		let vol = &output[0..output.len() - 5]; // trim '[off]' from "X%[off]"
-		return Ok(format!("\u{f6a9} {vol}"));
-	}
-	let value = output[0..output.len() - 1].parse::<i32>()?;
-	let icon = match value {
-		0 => "\u{f026}",
-		1..=75 => "\u{f027}",
-		76..=100 => "\u{f028}",
-		_ => "\u{f06d}",
-	};
-	return Ok(format!("{icon} {value}%"));
-}
+	let root_window = screens[0].root;
+    println!("X11 connection established!");
 
-pub fn get_battery_component() -> anyhow::Result<String> {
-	let percentage = std::fs::read_to_string("/sys/class/power_supply/BAT0/capacity")?
-		.trim()
-		.parse::<i32>()?;
-	let battery_icon = match percentage {
-		0..=10 => "\u{f06d}",
-		11..=15 => "\u{f244}",
-		16..=50 => "\u{f243}",
-		51..=75 => "\u{f242}",
-		76..=99 => "\u{f241}",
-		100 => "\u{f240}",
-		_ => "\u{f06d}",
-	};
+    joinset.spawn(async move {
+        while let Result::Ok(_) = update_requests.recv() {
+            let status_bar_string = status_bar.render();
+            let _ = set_status_bar(&x11_conn, root_window, &status_bar_string);
+        } 
+    });
 
-	let charging_status = std::fs::read_to_string("/sys/class/power_supply/BAT0/status")?;
-	let charging_icon = if charging_status.trim() == "Charging" { "\u{f0e7} " } else { "" };
-	
-	return Ok(format!("{charging_icon}{battery_icon} {percentage}%"));
-}
-
-pub fn get_wifi_component() -> anyhow::Result<String> {
-	// nmcli -t -f active,ssid dev wifi | egrep '^yes' | cut -d':' -f2
-	let proc = std::process::Command::new("bash")
-		.arg("-c")
-		.arg("nmcli -t -f active,ssid dev wifi 						\
-				| egrep '^yes'										\
-				| cut -d':' -f2")
-		.output()?;
-	if !proc.status.success() {
-		bail!("Couldn't fetch ssid level with 'nmcli' (egrep and cut).");
-	}
-	let ssid = std::str::from_utf8(&proc.stdout[..])?.trim();
-	let connected = !ssid.is_empty();
-	let icon = if connected { "\u{f1eb} " } else { "\u{f05e}" };
-	return Ok(format!("{icon}{ssid}"));
-}
-
-pub fn get_status_bar() -> anyhow::Result<String> {
-	let time = get_time_component();
-	let vol = get_vol_component()?;
-	let batt = get_battery_component()?;
-	let wifi = get_wifi_component()?;
-	// battery and sound icons from font-awesome
-	return Ok(format!(" {wifi} | {batt} | {vol} | {time} "));
-}
-
-pub async fn handle_dbus_calls(conn: &RustConnection, root: Window, dbus_stream: &mut MessageStream) -> anyhow::Result<()> {
-	while let Some(msg) = dbus_stream.try_next().await? {
-		let msg_header = msg.header()?;
-		if msg_header.message_type()? != MessageType::MethodCall { continue; }
-		if msg.member().context("No member name on dbus-call")?.as_str() != "Update" { continue;}
-		let win_name = get_status_bar()?;
-		set_status_bar(&conn, root, &win_name)?;
-	}
-	Ok(())
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-	let conn = Arc::new(x11rb::connect(None)?.0);
-	
-	let roots = &conn.setup().roots;
-	if roots.len() < 1 {
-		bail!("No root window");
-	}
-	let root: u32 = roots[0].root;
+    let status_bar = Arc::new(StatusBar::new());
+    let (update_handle, update_requests) = channel();
+    let mut joinset = JoinSet::new();
 
-	let connection = zbus::Connection::session()
-        .await?;
-    connection.request_name("org.user.StatusBar")
-        .await?;
+    start_update_status_bar(status_bar.clone(), &mut joinset, update_requests)?;
+    start_time_component(status_bar.clone(), &mut joinset, update_handle.clone());
+    start_volume_component(status_bar.clone(), &mut joinset, update_handle.clone());
+    start_battery_component(status_bar.clone(), &mut joinset, update_handle.clone());
+    start_wifi_component(status_bar.clone(), &mut joinset, update_handle.clone());
 
-	let mut stream = zbus::MessageStream::from(&connection);
+    while let Some(_) = joinset.join_next().await {}
 
-	let conn_dbus_thread = conn.clone();
-
-	tokio::spawn(async move {
-		if let Err(err) = handle_dbus_calls(&conn_dbus_thread, root,&mut stream).await {
-			eprintln!("{err}");
-			std::process::exit(1);
-		}
-	});
-	
-	loop {
-		let win_name = get_status_bar()?;
-		set_status_bar(&conn, root, &win_name)?;
-
-		tokio::time::sleep(Duration::from_secs(1)).await;
-	}
+    Ok(())
 }
