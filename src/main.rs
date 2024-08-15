@@ -1,6 +1,7 @@
 mod status_bar;
 
 use status_bar::StatusBar;
+use sysinfo::System;
 use tokio::task::JoinSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -210,6 +211,17 @@ pub fn start_update_status_bar(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let mut dwm_is_up = false;
+    let sys = System::new_all();
+    print!("Waiting for dwm... ");
+    while !dwm_is_up {
+        dwm_is_up = sys.processes()
+            .values()
+            .any(|p| p.name().to_str().unwrap().contains("dwm"));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    println!("found");
+
     let status_bar = Arc::new(StatusBar::new());
     let (update_handle, update_requests) = channel();
     let mut joinset = JoinSet::new();
