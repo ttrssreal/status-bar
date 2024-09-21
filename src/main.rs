@@ -1,7 +1,6 @@
 mod status_bar;
 
 use status_bar::StatusBar;
-use sysinfo::System;
 use tokio::task::JoinSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -69,23 +68,35 @@ pub fn start_volume_component(
                 .output()
                 .await;
             let res = match amixer_out {
-                Result::Ok(Output { status, stdout, stderr }) => {
+                Result::Ok(Output { status, stdout, .. }) => {
                     if status.success() {
                         stdout
                     } else {
-                        panic!("{err_msg}: {stderr:?}")
+                        println!("{err_msg}");
+                        continue;
                     }
                 },
                 Err(_) => panic!("{}", err_msg)
             };
             let audio_info = String::from_utf8_lossy(res.as_slice());
-            let audio_level_line = audio_info
+            let audio_level_line = match audio_info
                 .lines()
-                .find(|line| { line.contains("Front Left:") })
-                .expect("Bad 'amixer' output");
-            let audio_level = &audio_level_re
-                .captures(audio_level_line)
-                .expect("Bad 'amixer' output")[1];
+                .find(|line| { line.contains("Front Left:") }) {
+                    Some(s) => s,
+                    _ => {
+                        eprintln!("Bad 'amixer' output");
+                        continue;
+                    }
+
+            };
+            let audio_level = &(match audio_level_re
+                .captures(audio_level_line) {
+                    Some(s) => s,
+                    _ => {
+                        eprintln!("Bad 'amixer' output");
+                        continue;
+                    }
+                })[1];
             let value = audio_level[0..audio_level.len() - 1].parse::<u32>()
                 .unwrap();
             let icon = match value {
@@ -211,17 +222,6 @@ pub fn start_update_status_bar(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut dwm_is_up = false;
-    let sys = System::new_all();
-    print!("Waiting for dwm... ");
-    while !dwm_is_up {
-        dwm_is_up = sys.processes()
-            .values()
-            .any(|p| p.name().to_str().unwrap().contains("dwm"));
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    println!("found");
-
     let status_bar = Arc::new(StatusBar::new());
     let (update_handle, update_requests) = channel();
     let mut joinset = JoinSet::new();
