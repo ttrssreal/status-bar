@@ -29,6 +29,8 @@
           postInstall = ''
             wrapProgram $out/bin/status_bar --prefix PATH : ${runtimeDeps}
           '';
+
+          meta.mainProgram = "status_bar";
         };
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
